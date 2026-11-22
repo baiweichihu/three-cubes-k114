@@ -1,0 +1,26 @@
+[package]
+name = "k114"
+version = "0.1.0"
+edition = "2021"
+description = "Local search kernel for x^3+y^3+z^3 = 114"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "k114"
+path = "src/lib.rs"
+
+[[bin]]
+name = "k114"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
