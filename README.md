@@ -31,26 +31,45 @@ This project is a from-scratch, single-machine implementation of the state-of-th
 
 ## Status
 
-**Working engine, verified against published solutions.**
+**Working engine and a local console, verified against published solutions.**
 
 - [x] Mathematics, algorithm selection, and survey of every published search range → [`docs/DESIGN.md`](docs/DESIGN.md)
 - [x] Region selection (disjoint from all published searches)
 - [x] `u256`, exact test, modular filters, cube roots, curve scan, segmented `d` enumeration, CLI
 - [x] End-to-end regression on the known solutions for $k=3, 33, 42, 795$, plus brute-force cross-checks for small $k$
 - [x] 27 tests green; measured baseline $2.8\times10^{6}$ values of $d$ per second
+- [x] Resumable runs (`--resume`) and a `/`-page console with start/stop, statistics and a $(z, d)$ coverage plot
 - [ ] Root caching / prime bands (the measured bottleneck)
 - [ ] Hit-set cross-check against the reference C implementation `zcubes`
 - [ ] Long run on the selected region
 
+## Console
+
+A single page on `127.0.0.1`: start/stop the engine, watch the totals, and see the scanned
+region as a picture. `x` is $z$, `y` is $d = |x+y|$, both log-scaled and auto-fitted; the
+wheel zooms, dragging pans, a double-click resets. The shaded band is the set of $(z,d)$
+pairs already checked and found not to be solutions; the pale outline is what is left.
+
+![Console](docs/screenshot.png)
+
+```bat
+console.bat 1.4815e18 1.48152e18 2 runs\region-a
+```
+
+`Start` resumes from the last checkpointed block, so closing the lid or pressing `Stop`
+costs at most one block of work. Keep `--threads` at 2–4 on a machine that is also used
+for other work; the console launches the engine below normal priority by default.
+
 ## Usage
 
 ```
-k114 --dlo 1481500000000000000 --dhi 1481504194304000000 --threads 8 --out runs/a
+k114 --dlo 1481500000000000000 --dhi 1481504194304000000 --threads 2 --out runs/a
 ```
 
 Scans `d ∈ [dlo, dhi)` with `R = |z|/d ∈ [3.4, 64]`, writes `hits.jsonl`, `progress.log`
 and a `region.json` manifest. `--k`, `--rlo`, `--rhi`, `--block` adjust the target and the
-region shape.
+region shape; `--resume` continues an interrupted run; `--emit-json` writes machine-readable
+progress to stdout (that is what the console reads).
 
 ```
 cargo test --release          # 27 tests, includes the published solutions

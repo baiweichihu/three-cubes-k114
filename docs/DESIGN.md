@@ -330,63 +330,112 @@ u128 alone is insufficient ($3.4\times10^{38}$ caps $z$ at $7\times10^{12}$), he
 
 ## 5. Architecture
 
-### 5.1 Crate layout
+### 5.1 Layout
 
 ```
 local-computing/
-├── Cargo.toml            rayon only
+├── Cargo.toml            no external dependencies
+├── console.bat           one-click launcher for the web console
 ├── src/
-│   ├── main.rs           CLI, region iteration, output, throughput
+│   ├── main.rs           CLI, region iteration, resume, JSON events, manifest
 │   ├── u256.rs           U256: mul / div_rem_u128 / isqrt / cmp / shifts
 │   ├── exact.rs          §2.3 acceptance test (sign–magnitude over U256)
 │   ├── filters.rs        mod-243 wheel + 15 prime QR bitmaps
-│   ├── roots.rs          cube roots mod p^e (AMM + Hensel), CRT
+│   ├── roots.rs          cube roots mod p^e (bijections / AMM / Hensel / CRT)
 │   ├── dgen.rs           segmented factorisation of a d block
-│   ├── curve.rs          one (d,r): AP walk + filter chain + exact test
-│   └── store.rs          hits.jsonl, region.json, progress
+│   └── curve.rs          one (d,r): AP walk + filter chain + exact test
+├── app/
+│   ├── server.py         local HTTP console (stdlib only), spawns the engine
+│   └── static/index.html single page: start/stop, statistics, (z,d) plot
 ├── tests/
 │   └── known.rs          known-solution regression
-└── benches/
-    └── throughput.rs
+└── docs/DESIGN.md, docs/screenshot.png
 ```
 
-No SQLite: progress is an append-only text log, which is enough for resumption and avoids a dependency.
+There is no `store.rs`: persistence is three plain files in `<out>/` (`hits.jsonl`,
+`progress.log`, `region.json`) plus the console's `console.json`, written by `main.rs` and
+`app/server.py` respectively. No SQLite, no dependencies.
 
 ### 5.2 Data flow
 
 ```
 Region{k,dlo,dhi,Rlo,Rhi}
   └─> d blocks ──> dgen (factorisation) ──> [(d, roots)]
-                                                   │ rayon over d
+                                                   │ std::thread::scope over d
                               curve::scan(d, r, s, q-range)
                                                    ↓ hits (rare)
-                                     store::append(hit)  → region.json checkpoint
+                          hits.jsonl / progress.log / region.json
+                                                   │ JSON event per block on stdout
+                                     app/server.py ──> /api/state ──> index.html
 ```
 
 ### 5.3 Parallelism
 
 - Granularity: **d-block** (never the $q$ loop), so the wheel and masks are shared and there is no synchronisation in the hot path.
 - Per-thread hit vectors and counters, merged at block boundaries.
-- Threads = physical cores (8), not 16: the laptop has a power ceiling and 16 threads reduces sustained clocks.
+- Threads: the machine is a shared laptop, so the *default is 2* (via `console.bat`) and the engine is launched below normal priority. Benchmarks used 8 threads, but that is the "machine is free" setting, not the daily one; 16 threads is never optimal here because of the power ceiling.
 
 ### 5.4 Persistence and self-certification
 
-`runs/<timestamp>/`:
+`<out>/`:
 
-1. `progress.log` — one line per completed d-block with point counts; the only resumption state.
-2. `hits.jsonl` — `{k, x, y, z, d, r, q, verified:true}`, fsynced on write.
-3. `region.json` — $k$, $d\in[d_{lo},d_{hi})$, $R\in[R_{lo},R_{hi}]$, engine version, build flags, start/end, total points, measured throughput, `completed: true|partial`.
+1. `progress.log` — appended, one line per completed d-block with cumulative counts. **This is the resumption state**: `--resume` takes the maximum `d<=` value and starts there.
+2. `hits.jsonl` — appended, `{k, x, y, z, d, verified:true}`, flushed right after a hit.
+3. `region.json` — the manifest of the *invocation*: $k$, `d_lo`/`d_hi` actually scanned, `resumed_from`, `frontier`, $R$ band, engine version, threads, block size, points, curves, exact tests, hits, provably-empty counts, seconds, throughput, `completed`.
+4. `engine.stderr.log` — the engine's human log, when launched from the console.
+5. `console.json` — the console's cumulative view of the *region* (scanned intervals, totals, hits), so the picture survives a console restart.
 
-`region.json` is the only acceptable evidence for "this rectangle has been scanned"; it is written `completed` only when every $d$ in the range was processed (no `pmax` truncation, no skipped $d$).
+Division of responsibility: `region.json` certifies one invocation; `console.json` certifies the region. Neither is written `completed` unless every $d$ in the range was actually processed, with `dense_skipped = 0` (a `d` whose factorisation overflowed the 16-slot array is *not* scanned, and would have to be declared).
 
-### 5.5 CLI (draft)
+All three files are opened in **append** mode, so a resumed run never destroys the earlier record.
+
+### 5.5 CLI
 
 ```
 k114 --k 114 --dlo 1.4815e18 --dhi 1.4816e18 \
-     --rlo 3.4 --rhi 64 --threads 8 --out runs/20261123-a
+     --rlo 3.4 --rhi 64 --threads 2 --out runs/20261123-a [--resume] [--emit-json]
 ```
 
 $z$ bounds are expressed as the ratio $R=z/d$, because $R>3.847$ is intrinsic and ratios are directly comparable with published rectangles.
+
+### 5.6 Web console (`app/`)
+
+The console is deliberately thin, and the engine stays dumb: it knows nothing about
+pausing, cancelling or aggregate state. Standard library only, one page on `127.0.0.1`.
+
+| Piece | Responsibility |
+|---|---|
+| `app/server.py` | `ThreadingHTTPServer`; spawns the engine with `--resume --emit-json` (below normal priority), one reader thread parses its stdout, serves `/` and `/api/{state,start,stop}`, persists `console.json` |
+| `app/static/index.html` | single page: Start/Stop, statistics tiles, coverage card, canvas plot; polls `/api/state` every second |
+
+**Event protocol** (one JSON object per line on stdout, only with `--emit-json`):
+
+```
+{"event":"start","k":114,"dlo":...,"dhi":...,"rlo":...,"rhi":...,"threads":...,"block":...,"resumed_from":...}
+{"event":"block","d_lo":...,"d_hi":...,"points":...,"cum_points":...,"curves":...,"exact":...,"cum_exact":...,"hits":...,"no_roots":...,"div3":...,"dense":...,"secs":...}
+{"event":"hit","x":"...","y":"...","z":"...","d":...}
+{"event":"done","frontier":...,"points":...,"hits":...,"completed":true|false}
+```
+
+Human progress still goes to stderr, so a console-launched run leaves a readable log.
+
+**Why the console owns resumption.** `Stop` is a process termination on Windows, so up to
+one block is lost; that is acceptable because a block is 65536 values of $d$ — about 0.2 s
+at the target scale. On `Start`, the engine is invoked with `--resume`, which re-reads
+`progress.log`. The console therefore only has to aggregate, never to checkpoint.
+
+**The plot.** Axes are $x=z$, $y=d$, both $\log_{10}$; the fitted view is the configured
+region, so the picture shows progress against the plan. Each scanned interval
+$[d_0,d_1]$ is drawn as the quadrilateral between $z=R_{\min}d$ and $z=R_{\max}d$, which
+is the exact set of $(z,d)$ pairs proved not to be solutions. The implied height window
+$H=d\,R^{3/2}/\sqrt3$ is reported separately in the coverage card, because the plot's
+coordinates cannot show it directly.
+
+Two presentation details that matter at these magnitudes: when the $d$ interval is narrow
+relative to $d$ (the normal case — $10^{-4}$ relative width at $10^{18}$), the axis and
+ranges are printed as `base + offset`, otherwise every label rounds to the same number;
+and the wheel/drag zoom exists because a single auto-fit cannot resolve both the $z$
+decades and the $d$ sliver.
 
 ---
 
@@ -521,10 +570,12 @@ Targets: correctness first (equal hit sets), then ≥2× `zcubes` on the same re
 | M1 | `u256.rs` + `exact.rs` | unit tests pass; all four known solutions accepted | **done** |
 | M2 | `filters.rs` + `curve.rs` (no bit-sieve yet) | end-to-end recovery of all four; balanced accounting | **done** (bit-sieve deferred to M5) |
 | M3 | `roots.rs` + `dgen.rs` (contiguous $d$ enumeration) | arbitrary $d$ intervals, no smoothness restriction | **done** |
-| M4 | parallelism + progress/resume + manifest | kill and restart loses nothing | **done** (parallel, progress log, `region.json`; resume = re-run a smaller window) |
+| M4 | parallelism + progress + manifest | kill and restart loses nothing | **done** |
+| M4.5 | `--resume` reading `progress.log`; append-only outputs | an interrupted run continues at the last completed block | **done** |
+| M4.6 | web console: Start/Stop, statistics, $(z,d)$ coverage plot | page drives a real run; state survives a console restart | **done** |
 | M5 | root cache, prime bands, composite wheel, bit-sieve | ≥2× the v0.1.0 baseline, benchmarked | **next** |
 | M6 | cross-check hit sets against `zcubes` on one small rectangle | sets are equal, not merely similar | pending |
-| M7 | long run on V1 with $\Delta d$ from measured throughput | `region.json` says `completed: true` | pending |
+| M7 | long run, sized by measured throughput | `region.json` says `completed: true` | on demand (the console makes this a per-session decision) |
 
 ---
 

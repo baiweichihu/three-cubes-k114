@@ -1,8 +1,17 @@
-//! CLI: scan an annulus `d in [dlo, dhi)`, `R = z/d in [rlo, rhi]` for
-//! `x^3 + y^3 + z^3 = k`, writing hits and a region manifest.
+//! CLI: scan an annulus `d in [dlo, dhi)`, `R = |z|/d in [rlo, rhi]` for
+//! `x^3 + y^3 + z^3 = k`.
+//!
+//! Two output channels:
+//!   * stderr — human-readable progress;
+//!   * stdout — machine-readable JSON events, but only with `--emit-json`
+//!     (the web console in `app/` reads that stream).
+//!
+//! `--resume` reads `<out>/progress.log` and continues from the last completed
+//! block, so a run interrupted by sleep, reboot or the console's Stop button
+//! loses at most one block.
 
-use std::fs::File;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::time::Instant;
 
 use k114::curve::{self, Stats};
@@ -20,15 +29,19 @@ struct Cfg {
     threads: usize,
     block: u64,
     out: String,
+    resume: bool,
+    emit_json: bool,
 }
 
 fn usage() {
     eprintln!(
         "usage: k114 --dlo <u64|1.2e18> --dhi <...> [--k 114] [--rlo 3.4] [--rhi 64]\n\
-         \x20            [--threads N] [--block N] [--out DIR]\n\n\
+         \x20            [--threads N] [--block N] [--out DIR] [--resume] [--emit-json]\n\n\
          Region: d in [dlo, dhi), and |z| in [rlo*d, rhi*d] with R = |z|/d.\n\
          The lower edge rlo must be below 1/(cuberoot(2)-1) = 3.8473 only for\n\
-         degenerate ties; 3.4 is a safe default."
+         degenerate ties; 3.4 is a safe default.\n\n\
+         --resume     continue after the last block recorded in <out>/progress.log\n\
+         --emit-json  write JSON progress events to stdout"
     );
 }
 
@@ -48,6 +61,30 @@ fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
         b = t;
     }
     a
+}
+
+/// Highest `d` recorded in `progress.log`, if the file exists.
+fn read_frontier(path: &str) -> Option<u64> {
+    let f = File::open(path).ok()?;
+    let mut frontier: Option<u64> = None;
+    for line in BufReader::new(f).lines().map_while(Result::ok) {
+        let Some(rest) = line.strip_prefix("d<=") else {
+            continue;
+        };
+        let Some(tok) = rest.split_whitespace().next() else {
+            continue;
+        };
+        if let Ok(v) = tok.parse::<u64>() {
+            frontier = Some(frontier.map_or(v, |m: u64| m.max(v)));
+        }
+    }
+    frontier
+}
+
+fn emit_json(line: &str) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{}", line);
+    let _ = out.flush();
 }
 
 fn process(f: &Filters, k: i64, rlo: f64, rhi: f64, entries: &[DEntry]) -> (Stats, Vec<Triple>) {
@@ -119,12 +156,31 @@ fn main() {
             .unwrap_or(4),
         block: 1 << 14,
         out: String::new(),
+        resume: false,
+        emit_json: false,
     };
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
         let key = args[i].as_str();
+        match key {
+            "-h" | "--help" => {
+                usage();
+                return;
+            }
+            "--resume" => {
+                cfg.resume = true;
+                i += 1;
+                continue;
+            }
+            "--emit-json" => {
+                cfg.emit_json = true;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
         let val = args.get(i + 1).cloned().unwrap_or_default();
         match key {
             "--k" => cfg.k = val.parse().expect("--k"),
@@ -135,10 +191,6 @@ fn main() {
             "--threads" => cfg.threads = val.parse().expect("--threads"),
             "--block" => cfg.block = val.parse().expect("--block"),
             "--out" => cfg.out = val,
-            "-h" | "--help" => {
-                usage();
-                return;
-            }
             other => {
                 eprintln!("unknown argument: {}", other);
                 usage();
@@ -158,6 +210,37 @@ fn main() {
         std::process::exit(2);
     }
 
+    let out_dir = if cfg.out.is_empty() {
+        format!("runs/k{}", cfg.k)
+    } else {
+        cfg.out.clone()
+    };
+    std::fs::create_dir_all(&out_dir).expect("create output directory");
+    let progress_path = format!("{}/progress.log", out_dir);
+
+    // --- resume ---------------------------------------------------------
+    let mut resumed_from = cfg.dlo;
+    if cfg.resume {
+        if let Some(frontier) = read_frontier(&progress_path) {
+            if frontier > resumed_from {
+                resumed_from = frontier.min(cfg.dhi);
+            }
+        }
+    }
+    if resumed_from >= cfg.dhi {
+        eprintln!(
+            "nothing to do: frontier {} already reached dhi {}",
+            resumed_from, cfg.dhi
+        );
+        if cfg.emit_json {
+            emit_json(&format!(
+                "{{\"event\":\"complete\",\"dhi\":{},\"frontier\":{}}}",
+                cfg.dhi, resumed_from
+            ));
+        }
+        return;
+    }
+
     let sieve_limit = dgen::isqrt_u64(cfg.dhi - 1) + 1;
     eprintln!(
         "sieve: primes up to {} ({:.1} MB bitmap)",
@@ -169,27 +252,48 @@ fn main() {
     eprintln!("sieve built in {:.1}s", t0.elapsed().as_secs_f64());
 
     let filters = Filters::new(cfg.k);
-    let out_dir = if cfg.out.is_empty() {
-        format!("runs/k{}", cfg.k)
-    } else {
-        cfg.out.clone()
-    };
-    std::fs::create_dir_all(&out_dir).expect("create output directory");
-    let mut hits_file = File::create(format!("{}/hits.jsonl", out_dir)).expect("create hits.jsonl");
-    let mut progress_file =
-        File::create(format!("{}/progress.log", out_dir)).expect("create progress.log");
+
+    // Hits and progress are appended, never truncated: a resumed run must not
+    // lose the record of the earlier segments.
+    let mut hits_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("{}/hits.jsonl", out_dir))
+        .expect("open hits.jsonl");
+    let mut progress_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&progress_path)
+        .expect("open progress.log");
 
     eprintln!(
         "region: k={} d in [{}, {}) R in [{}, {}] threads={} block={}",
-        cfg.k, cfg.dlo, cfg.dhi, cfg.rlo, cfg.rhi, cfg.threads, cfg.block
+        cfg.k, resumed_from, cfg.dhi, cfg.rlo, cfg.rhi, cfg.threads, cfg.block
     );
+    if cfg.emit_json {
+        emit_json(&format!(
+            "{{\"event\":\"start\",\"k\":{},\"dlo\":{},\"dhi\":{},\"rlo\":{},\"rhi\":{},\
+             \"threads\":{},\"block\":{},\"resumed_from\":{},\"version\":\"{}\"}}",
+            cfg.k,
+            resumed_from,
+            cfg.dhi,
+            cfg.rlo,
+            cfg.rhi,
+            cfg.threads,
+            cfg.block,
+            resumed_from,
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
 
     let start = Instant::now();
     let mut total = Stats::default();
     let mut blocks_done = 0u64;
-    let mut block_lo = cfg.dlo;
+    let mut block_lo = resumed_from;
+    let mut frontier = resumed_from;
 
     while block_lo < cfg.dhi {
+        let this_lo = block_lo;
         let block_hi = (block_lo + cfg.block).min(cfg.dhi);
         let entries = dgen::factor_block(block_lo, block_hi, &sieve);
 
@@ -210,8 +314,9 @@ fn main() {
                 .collect()
         });
 
+        let mut block_stats = Stats::default();
         for (st, hs) in results {
-            total.merge(&st);
+            block_stats.merge(&st);
             for t in hs.iter() {
                 let d = (t.x + t.y).unsigned_abs();
                 writeln!(
@@ -221,14 +326,22 @@ fn main() {
                 )
                 .expect("write hit");
                 eprintln!("HIT k={} (x,y,z)=({}, {}, {})", cfg.k, t.x, t.y, t.z);
+                if cfg.emit_json {
+                    emit_json(&format!(
+                        "{{\"event\":\"hit\",\"x\":\"{}\",\"y\":\"{}\",\"z\":\"{}\",\"d\":{}}}",
+                        t.x, t.y, t.z, d
+                    ));
+                }
             }
-            if !hs.is_empty() {
-                hits_file.flush().ok();
-            }
+        }
+        total.merge(&block_stats);
+        if total.hits > 0 {
+            hits_file.flush().ok();
         }
 
         blocks_done += 1;
         block_lo = block_hi;
+        frontier = block_lo;
 
         let el = start.elapsed().as_secs_f64();
         let pts = total.points();
@@ -238,6 +351,29 @@ fn main() {
             block_lo, blocks_done, pts, total.exact_tests, total.hits, el
         )
         .ok();
+        progress_file.flush().ok();
+
+        if cfg.emit_json {
+            emit_json(&format!(
+                "{{\"event\":\"block\",\"d_lo\":{},\"d_hi\":{},\"points\":{},\"cum_points\":{},\
+                 \"curves\":{},\"exact\":{},\"cum_exact\":{},\"hits\":{},\"cum_hits\":{},\
+                 \"no_roots\":{},\"div3\":{},\"dense\":{},\"secs\":{:.3}}}",
+                this_lo,
+                block_hi,
+                block_stats.points(),
+                pts,
+                block_stats.curves,
+                block_stats.exact_tests,
+                total.exact_tests,
+                block_stats.hits,
+                total.hits,
+                block_stats.no_roots,
+                block_stats.div3_skipped,
+                block_stats.dense_skipped,
+                el
+            ));
+        }
+
         if blocks_done % 8 == 0 || block_lo >= cfg.dhi {
             eprintln!(
                 "d<={:.4e} blocks={} points={:.3e} ({:.2e}/s) exact={} curves={} hits={} {:.0}s",
@@ -260,14 +396,17 @@ fn main() {
 
     let el = start.elapsed().as_secs_f64();
     let manifest = format!(
-        "{{\n  \"k\": {},\n  \"d_lo\": {},\n  \"d_hi\": {},\n  \"r_lo\": {},\n  \"r_hi\": {},\n  \
+        "{{\n  \"k\": {},\n  \"d_lo\": {},\n  \"d_hi\": {},\n  \"resumed_from\": {},\n  \
+         \"frontier\": {},\n  \"r_lo\": {},\n  \"r_hi\": {},\n  \
          \"engine\": \"k114 {}\",\n  \"threads\": {},\n  \"block\": {},\n  \"points\": {},\n  \
          \"curves\": {},\n  \"exact_tests\": {},\n  \"hits\": {},\n  \"no_roots\": {},\n  \
-         \"dense_skipped\": {},\n  \"seconds\": {:.1},\n  \"points_per_second\": {:.3e},\n  \
-         \"completed\": {}\n}}\n",
+         \"div3_skipped\": {},\n  \"dense_skipped\": {},\n  \"seconds\": {:.1},\n  \
+         \"points_per_second\": {:.3e},\n  \"d_per_second\": {:.3e},\n  \"completed\": {}\n}}\n",
         cfg.k,
-        cfg.dlo,
+        resumed_from,
         cfg.dhi,
+        resumed_from,
+        frontier,
         cfg.rlo,
         cfg.rhi,
         env!("CARGO_PKG_VERSION"),
@@ -278,15 +417,35 @@ fn main() {
         total.exact_tests,
         total.hits,
         total.no_roots,
+        total.div3_skipped,
         total.dense_skipped,
         el,
         total.points() as f64 / el.max(1e-9),
-        if blocks_done > 0 && block_lo >= cfg.dhi { "true" } else { "false" }
+        (frontier - resumed_from) as f64 / el.max(1e-9),
+        if frontier >= cfg.dhi { "true" } else { "false" }
     );
     std::fs::write(format!("{}/region.json", out_dir), manifest).expect("write region.json");
 
+    if cfg.emit_json {
+        emit_json(&format!(
+            "{{\"event\":\"done\",\"frontier\":{},\"points\":{},\"exact\":{},\"hits\":{},\
+             \"div3\":{},\"no_roots\":{},\"dense\":{},\"secs\":{:.3},\"completed\":{}}}",
+            frontier,
+            total.points(),
+            total.exact_tests,
+            total.hits,
+            total.div3_skipped,
+            total.no_roots,
+            total.dense_skipped,
+            el,
+            frontier >= cfg.dhi
+        ));
+    }
+
     eprintln!(
-        "done: points={:.3e} in {:.1}s ({:.2e}/s), exact={}, hits={}, output={}",
+        "done: d in [{:.4e}, {:.4e}) points={:.3e} in {:.1}s ({:.2e}/s), exact={}, hits={}, output={}",
+        resumed_from as f64,
+        frontier as f64,
         total.points() as f64,
         el,
         total.points() as f64 / el.max(1e-9),

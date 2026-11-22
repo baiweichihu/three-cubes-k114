@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>k114 console</title>
+<style>
+  :root{
+    --bg:#f4f5f7; --card:#ffffff; --soft:#f7f8fa; --line:#e4e7ec;
+    --fg:#1b1f24; --dim:#6b7280; --faint:#9aa3af;
+    --accent:#2563eb; --accent-h:#1d4ed8;
+    --red:#dc2626; --red-h:#b91c1c;
+    --green:#15803d; --amber:#b45309;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,
+      "Helvetica Neue",Arial,sans-serif;
+    font-size:14px;line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    display:flex;justify-content:center;padding:20px 20px 40px;
+  }
+  .wrap{width:100%;max-width:1080px}
+  .mono{font-family:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Consolas,
+    "Liberation Mono",monospace;font-variant-numeric:tabular-nums}
+
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:18px 20px;margin-bottom:12px;
+    box-shadow:0 1px 2px rgba(16,24,40,.04);
+  }
+
+  /* header */
+  .head{display:flex;align-items:center;justify-content:space-between;gap:16px;
+    padding:6px 2px 14px}
+  .head h1{margin:0;font-size:19px;font-weight:650;letter-spacing:-.2px}
+  .head .sub{margin-top:4px;color:var(--dim);font-size:12.5px}
+  .pill{font-size:12px;font-weight:600;padding:4px 11px;border-radius:999px;
+    background:var(--soft);color:var(--dim);border:1px solid var(--line);white-space:nowrap}
+  .pill.run{background:#ecfdf5;color:var(--green);border-color:#a7f3d0}
+  .pill.err{background:#fef2f2;color:var(--red);border-color:#fecaca}
+  .pill.done{background:#eff6ff;color:var(--accent);border-color:#bfdbfe}
+
+  /* controls */
+  .controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  button{
+    font:inherit;font-weight:600;font-size:13px;border-radius:9px;padding:9px 18px;
+    border:1px solid transparent;cursor:pointer;transition:background .12s,border-color .12s;
+  }
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .primary{background:var(--accent);color:#fff;border-color:var(--accent-h);
+    box-shadow:0 1px 3px rgba(37,99,235,.25)}
+  .primary:not(:disabled):hover{background:var(--accent-h)}
+  .danger{background:var(--red);color:#fff;border-color:var(--red-h);
+    box-shadow:0 1px 3px rgba(220,38,38,.22)}
+  .danger:not(:disabled):hover{background:var(--red-h)}
+  .timer{margin-left:auto;font-size:28px;font-weight:500;letter-spacing:.4px}
+  .timer small{font-size:12px;color:var(--faint);margin-left:8px;font-weight:500}
+
+  /* stats */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px}
+  .tile{background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .tile .k{font-size:11.5px;color:var(--dim);font-weight:600;text-transform:uppercase;
+    letter-spacing:.04em}
+  .tile .v{font-size:17px;font-weight:600;margin-top:3px;letter-spacing:-.2px}
+  .tile .v.small{font-size:14px}
+  .tile.hi{background:#f0f7ff;border-color:#cfe0fb}
+
+  h2{font-size:13px;font-weight:650;margin:0 0 10px;color:var(--fg)}
+  h2 span{color:var(--faint);font-weight:500;margin-left:8px;font-size:12px}
+
+  /* coverage text */
+  .cov{display:grid;grid-template-columns:128px 1fr;gap:6px 14px;font-size:13px}
+  .cov .k{color:var(--dim)}
+  .cov .v{font-weight:500}
+  .note{margin-top:10px;font-size:12.5px;color:var(--dim);
+    background:var(--soft);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+  .note b{color:var(--fg);font-weight:600}
+
+  /* plot */
+  .plotwrap{position:relative}
+  canvas{display:block;width:100%;height:420px;border-radius:9px;background:#fcfcfd;
+    border:1px solid var(--line);cursor:crosshair}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12.5px;color:var(--dim)}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;
+    vertical-align:-1px}
+  .hint{position:absolute;right:10px;bottom:10px;font-size:11.5px;color:var(--faint);
+    pointer-events:none}
+  .err{color:var(--red);font-size:13px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="head">
+    <div>
+      <h1>k114 console</h1>
+      <div class="sub" id="sub">loading…</div>
+    </div>
+    <div class="pill" id="pill">connecting</div>
+  </div>
+
+  <div class="card">
+    <div class="controls">
+      <button class="primary" id="start">Start</button>
+      <button class="danger" id="stop" disabled>Stop</button>
+      <div class="timer mono"><span id="timer">00:00:00</span><small id="rate">—</small></div>
+    </div>
+    <div class="err" id="err"></div>
+  </div>
+
+  <div class="card">
+    <h2>Statistics</h2>
+    <div class="grid">
+      <div class="tile hi"><div class="k">d frontier</div><div class="v small mono" id="s-d">—</div></div>
+      <div class="tile"><div class="k">progress</div><div class="v small mono" id="s-prog">—</div></div>
+      <div class="tile"><div class="k">d / second</div><div class="v mono" id="s-rate">—</div></div>
+      <div class="tile"><div class="k">points tested</div><div class="v mono" id="s-points">—</div></div>
+      <div class="tile"><div class="k">curves</div><div class="v mono" id="s-curves">—</div></div>
+      <div class="tile"><div class="k">exact tests</div><div class="v mono" id="s-exact">—</div></div>
+      <div class="tile"><div class="k">hits</div><div class="v mono" id="s-hits">0</div></div>
+      <div class="tile"><div class="k">blocks</div><div class="v mono" id="s-blocks">0</div></div>
+    </div>
+    <div class="note" id="empty-note">
+      Provably empty work is reported separately: <b id="s-div3">0</b> values of <span class="mono">d</span>
+      skipped because <span class="mono">3 | d</span> (impossible when <span class="mono">k ≡ 3,6 mod 9</span>),
+      <b id="s-noroots">0</b> skipped because <span class="mono">z³ ≡ k (mod d′)</span> has no root,
+      <b id="s-dense">0</b> skipped because the factorisation did not fit (must stay 0 for the coverage claim).
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Coverage in xyz <span>what the scanned (z, d) region implies</span></h2>
+    <div class="cov" id="cov">
+      <div class="k">scanned for</div><div class="v" id="cov-k">—</div>
+      <div class="k">d = |x+y|</div><div class="v mono" id="cov-d">—</div>
+      <div class="k">R = |z|/d</div><div class="v mono" id="cov-r">—</div>
+      <div class="k">|z|</div><div class="v mono" id="cov-z">—</div>
+      <div class="k">max(|x|,|y|)</div><div class="v mono" id="cov-h">—</div>
+    </div>
+    <div class="note" id="cov-note">
+      Every integer triple with <span class="mono">|x+y|</span> and <span class="mono">|z|/|x+y|</span>
+      inside the scanned ranges has been checked and none was a solution. <span class="mono">max(|x|,|y|)</span>
+      follows from <span class="mono">H = d·R<sup>3/2</sup>/√3</span> and is reported as the implied height window.
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Scanned region <span>x: z, y: d — log scales, wheel to zoom, drag to pan, double-click to reset</span></h2>
+    <div class="plotwrap">
+      <canvas id="plot"></canvas>
+      <div class="hint" id="hint"></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:rgba(37,99,235,.10);border:1px solid #bfdbfe"></i>planned region (R between the two edges)</span>
+      <span><i style="background:rgba(21,128,61,.20);border:1px solid #86efac"></i>scanned — no solution</span>
+      <span><i style="background:rgba(180,83,9,.35);border:1px solid #fcd34d"></i>in flight</span>
+      <span><i style="background:var(--red)"></i>hit</span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("plot");
+  const ctx = canvas.getContext("2d");
+
+  let state = null;
+  let view = null;          // {x0,x1,y0,y1} in log10 space
+  let userZoomed = false;
+  let drag = null;
+
+  // ---------------------------------------------------------------- helpers
+  const fmtSci = (v) => {
+    if (!isFinite(v) || v === 0) return "0";
+    const e = Math.floor(Math.log10(Math.abs(v)));
+    const m = v / Math.pow(10, e);
+    return `${m.toFixed(m >= 100 ? 0 : m >= 10 ? 1 : 2)}e${e}`;
+  };
+  const fmtSci4 = (v) => {
+    if (!isFinite(v) || v === 0) return "0";
+    const e = Math.floor(Math.log10(Math.abs(v)));
+    const m = v / Math.pow(10, e);
+    return `${m.toFixed(4)}e${e}`;
+  };
+  const fmtInt = (v) => {
+    if (v === null || v === undefined) return "—";
+    if (v >= 1e6) return fmtSci(v);
+    return v.toLocaleString("en-US");
+  };
+  // Ranges whose width is tiny relative to their position (d at 1e18, for one)
+  // are unreadable in absolute form, so print base + offset instead.
+  const fmtPair = (lo, hi) => {
+    if (!isFinite(lo) || !isFinite(hi)) return "—";
+    const rel = Math.abs(hi) > 0 ? Math.abs(hi - lo) / Math.abs(hi) : 0;
+    if (rel < 0.01) return `${fmtSci4(lo)} + [0, ${fmtSci(hi - lo)}]`;
+    return `[${fmtSci4(lo)}, ${fmtSci4(hi)}]`;
+  };
+  const fmtDur = (s) => {
+    s = Math.max(0, Math.floor(s));
+    const h = String(Math.floor(s / 3600)).padStart(2, "0");
+    const m = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+    const x = String(s % 60).padStart(2, "0");
+    return `${h}:${m}:${x}`;
+  };
+
+  // ------------------------------------------------------------------- poll
+  async function poll() {
+    try {
+      const r = await fetch("/api/state", { cache: "no-store" });
+      state = await r.json();
+      render();
+      $("pill").className = "pill " + (!state.last_error && state.running ? "run"
+        : state.last_error ? "err" : state.completed ? "done" : "");
+    } catch (e) {
+      $("pill").className = "pill err";
+      $("pill").textContent = "console unreachable";
+    }
+  }
+
+  // ----------------------------------------------------------------- render
+  function render() {
+    const s = state;
+    if (!s) return;
+    const region = s.region || {};
+    const t = s.totals || {};
+
+    if (!s.last_error && s.running) {
+      $("pill").textContent = `running · pid ${s.pid}`;
+    } else if (s.last_error) {
+      $("pill").textContent = "error";
+    } else if (s.completed) {
+      $("pill").textContent = "region complete";
+    } else {
+      $("pill").textContent = "stopped";
+    }
+
+    $("sub").innerHTML = `k = <b>${region.k}</b> · d ∈ <span class="mono">${fmtPair(region.dlo, region.dhi)}</span>
+      · R = |z|/d ∈ [<span class="mono">${region.rlo}</span>, <span class="mono">${region.rhi}</span>]`;
+
+    $("start").disabled = !!s.running || !!s.completed;
+    $("stop").disabled = !s.running;
+    $("timer").textContent = fmtDur(s.elapsed || 0);
+    $("rate").textContent = s.running ? `${fmtSci(s.rate_d_per_s || 0)} d/s` : "";
+    $("err").textContent = s.last_error || "";
+
+    const cov = s.coverage;
+    const frontier = cov ? cov.d_hi : region.dlo;
+    const dRelSpan = (region.dhi - region.dlo) / region.dhi;
+    $("s-d").textContent = dRelSpan < 0.01
+      ? `+${fmtSci(frontier - region.dlo)}`
+      : fmtSci4(frontier);
+    const span = (region.dhi - region.dlo) || 1;
+    const done = cov ? Math.min(1, (cov.d_hi - region.dlo) / span) : 0;
+    $("s-prog").textContent = `${(done * 100).toFixed(done > 0.999 ? 0 : 3)}%`;
+    $("s-rate").textContent = s.running ? fmtSci(s.rate_d_per_s || 0) : "—";
+    $("s-points").textContent = fmtInt(t.points || 0);
+    $("s-curves").textContent = fmtInt(t.curves || 0);
+    $("s-exact").textContent = fmtInt(t.exact || 0);
+    $("s-hits").textContent = fmtInt(t.hits || 0);
+    $("s-blocks").textContent = fmtInt(t.blocks || 0);
+    $("s-div3").textContent = fmtInt(t.div3 || 0);
+    $("s-noroots").textContent = fmtInt(t.no_roots || 0);
+    $("s-dense").textContent = fmtInt(t.dense || 0);
+
+    if (cov) {
+      $("cov-k").textContent = `k = ${region.k}`;
+      $("cov-d").textContent = fmtPair(cov.d_lo, cov.d_hi);
+      $("cov-r").textContent = `[${region.rlo}, ${region.rhi}]`;
+      $("cov-z").textContent = fmtPair(cov.z_lo, cov.z_hi);
+      $("cov-h").textContent = fmtPair(cov.h_lo, cov.h_hi);
+    } else {
+      $("cov-k").textContent = `k = ${region.k}`;
+      $("cov-d").textContent = "nothing scanned yet";
+      $("cov-r").textContent = `[${region.rlo}, ${region.rhi}]`;
+      $("cov-z").textContent = "—";
+      $("cov-h").textContent = "—";
+    }
+
+    $("hint").textContent = s.runs && s.runs.length
+      ? `${s.runs.length} scanned interval${s.runs.length > 1 ? "s" : ""}`
+      : "no data yet";
+
+    if (!view) autoscale();
+    draw();
+  }
+
+  // ------------------------------------------------------------------ plot
+  function regionBounds() {
+    const r = state.region;
+    const d0 = Math.max(1, r.dlo), d1 = Math.max(d0 + 1, r.dhi);
+    return {
+      x0: Math.log10(r.rlo * d0),
+      x1: Math.log10(r.rhi * d1),
+      y0: Math.log10(d0),
+      y1: Math.log10(d1),
+    };
+  }
+
+  function autoscale() {
+    userZoomed = false;
+    const b = regionBounds();
+    const padx = (b.x1 - b.x0) * 0.04 + 1e-9;
+    const pady = Math.max((b.y1 - b.y0) * 0.10, 1e-6);
+    view = { x0: b.x0 - padx, x1: b.x1 + padx, y0: b.y0 - pady, y1: b.y1 + pady };
+  }
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { w, h };
+  }
+
+  const PAD = { l: 74, r: 18, t: 14, b: 42 };
+
+  function draw() {
+    if (!state) return;
+    const { w, h } = resize();
+    ctx.clearRect(0, 0, w, h);
+    const iw = w - PAD.l - PAD.r, ih = h - PAD.t - PAD.b;
+    if (iw <= 10 || ih <= 10) return;
+
+    const X = (lz) => PAD.l + ((lz - view.x0) / (view.x1 - view.x0)) * iw;
+    const Y = (ld) => PAD.t + ih - ((ld - view.y0) / (view.y1 - view.y0)) * ih;
+
+    // ---- grid + axis labels
+    ctx.font = "11px ui-monospace, Consolas, monospace";
+    ctx.fillStyle = "#9aa3af";
+    ctx.strokeStyle = "#eef0f3";
+    ctx.lineWidth = 1;
+    const nx = 6, ny = 6;
+    for (let i = 0; i <= nx; i++) {
+      const lz = view.x0 + (i / nx) * (view.x1 - view.x0);
+      const x = X(lz);
+      ctx.beginPath(); ctx.moveTo(x, PAD.t); ctx.lineTo(x, PAD.t + ih); ctx.stroke();
+      ctx.textAlign = "center"; ctx.textBaseline = "top";
+      ctx.fillText(fmtSci(Math.pow(10, lz)), x, PAD.t + ih + 6);
+    }
+    // The d axis spans a tiny relative range, so label it as an offset when needed.
+    const dSpanRel = (Math.pow(10, view.y1) - Math.pow(10, view.y0)) / Math.pow(10, view.y1);
+    const dBase = Math.pow(10, view.y0);
+    const offsetMode = dSpanRel < 0.02;
+    for (let i = 0; i <= ny; i++) {
+      const ld = view.y0 + (i / ny) * (view.y1 - view.y0);
+      const y = Y(ld);
+      ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(PAD.l + iw, y); ctx.stroke();
+      ctx.textAlign = "right"; ctx.textBaseline = "middle";
+      const v = Math.pow(10, ld);
+      ctx.fillText(offsetMode ? `+${fmtSci(v - dBase)}` : fmtSci(v), PAD.l - 8, y);
+    }
+    ctx.fillStyle = "#6b7280";
+    ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.fillText("z", PAD.l + iw / 2, h - 6);
+    ctx.save();
+    ctx.translate(14, PAD.t + ih / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textBaseline = "top";
+    ctx.fillText(offsetMode ? "Δd" : "d", 0, 0);
+    ctx.restore();
+
+    // ---- planned region: the wedge between z = rlo*d and z = rhi*d,
+    //      clipped to the configured d interval (not to the padded view)
+    const r = state.region;
+    const dTop = Math.min(r.dhi, Math.pow(10, view.y1));
+    const dBot = Math.max(r.dlo, Math.pow(10, view.y0));
+    if (dTop > dBot) {
+      const wedge = [
+        [Math.log10(r.rlo * dBot), Math.log10(dBot)],
+        [Math.log10(r.rhi * dBot), Math.log10(dBot)],
+        [Math.log10(r.rhi * dTop), Math.log10(dTop)],
+        [Math.log10(r.rlo * dTop), Math.log10(dTop)],
+      ];
+      ctx.beginPath();
+      wedge.forEach(([lx, ly], i) => (i ? ctx.lineTo(X(lx), Y(ly)) : ctx.moveTo(X(lx), Y(ly))));
+      ctx.closePath();
+      ctx.fillStyle = "rgba(37,99,235,.10)";
+      ctx.fill();
+      ctx.strokeStyle = "#c7d7f4";
+      ctx.setLineDash([4, 3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // ---- scanned runs
+    ctx.fillStyle = "rgba(21,128,61,.22)";
+    ctx.strokeStyle = "#86efac";
+    ctx.lineWidth = 1;
+    for (const [d0, d1] of state.runs || []) {
+      const quad = [
+        [Math.log10(r.rlo * d0), Math.log10(d0)],
+        [Math.log10(r.rhi * d0), Math.log10(d0)],
+        [Math.log10(r.rhi * d1), Math.log10(d1)],
+        [Math.log10(r.rlo * d1), Math.log10(d1)],
+      ];
+      ctx.beginPath();
+      quad.forEach(([lx, ly], i) => (i ? ctx.lineTo(X(lx), Y(ly)) : ctx.moveTo(X(lx), Y(ly))));
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+    }
+
+    // ---- block in flight
+    if (state.current) {
+      const [c0, c1] = state.current;
+      const quad = [
+        [Math.log10(r.rlo * c0), Math.log10(c0)],
+        [Math.log10(r.rhi * c0), Math.log10(c0)],
+        [Math.log10(r.rhi * c1), Math.log10(c1)],
+        [Math.log10(r.rlo * c1), Math.log10(c1)],
+      ];
+      ctx.beginPath();
+      quad.forEach(([lx, ly], i) => (i ? ctx.lineTo(X(lx), Y(ly)) : ctx.moveTo(X(lx), Y(ly))));
+      ctx.closePath();
+      ctx.fillStyle = "rgba(180,83,9,.30)";
+      ctx.fill();
+    }
+
+    // ---- hits
+    for (const hit of state.hits || []) {
+      const d = Number(hit.d);
+      const z = Math.abs(Number(hit.z));
+      if (!isFinite(d) || !isFinite(z) || d <= 0 || z <= 0) continue;
+      const x = X(Math.log10(z)), y = Y(Math.log10(d));
+      ctx.beginPath();
+      ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = "#dc2626";
+      ctx.fill();
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    // ---- frame
+    ctx.strokeStyle = "#e4e7ec";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(PAD.l + 0.5, PAD.t + 0.5, iw - 1, ih - 1);
+  }
+
+  // ------------------------------------------------------------- interactions
+  canvas.addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const px = (ev.clientX - rect.left - PAD.l) / (rect.width - PAD.l - PAD.r);
+    const py = 1 - (ev.clientY - rect.top - PAD.t) / (rect.height - PAD.t - PAD.b);
+    const k = ev.deltaY > 0 ? 1.12 : 1 / 1.12;
+    const cx = view.x0 + px * (view.x1 - view.x0);
+    const cy = view.y0 + py * (view.y1 - view.y0);
+    view = {
+      x0: cx + (view.x0 - cx) * k, x1: cx + (view.x1 - cx) * k,
+      y0: cy + (view.y0 - cy) * k, y1: cy + (view.y1 - cy) * k,
+    };
+    userZoomed = true;
+    draw();
+  }, { passive: false });
+
+  canvas.addEventListener("mousedown", (ev) => {
+    drag = { x: ev.clientX, y: ev.clientY, view: { ...view } };
+  });
+  window.addEventListener("mouseup", () => { drag = null; });
+  window.addEventListener("mousemove", (ev) => {
+    if (!drag) return;
+    const rect = canvas.getBoundingClientRect();
+    const dx = (ev.clientX - drag.x) / (rect.width - PAD.l - PAD.r);
+    const dy = (ev.clientY - drag.y) / (rect.height - PAD.t - PAD.b);
+    const w = view.x1 - view.x0, h = view.y1 - view.y0;
+    view = {
+      x0: drag.view.x0 - dx * w, x1: drag.view.x1 - dx * w,
+      y0: drag.view.y0 + dy * h, y1: drag.view.y1 + dy * h,
+    };
+    userZoomed = true;
+    draw();
+  });
+  canvas.addEventListener("dblclick", () => { autoscale(); draw(); });
+  window.addEventListener("resize", () => draw());
+
+  // ---------------------------------------------------------------- buttons
+  async function post(path) {
+    $("err").textContent = "";
+    try {
+      const r = await fetch(path, { method: "POST" });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || body.error) $("err").textContent = body.error || `request failed (${r.status})`;
+    } catch (e) {
+      $("err").textContent = String(e);
+    }
+    poll();
+  }
+  $("start").addEventListener("click", () => post("/api/start"));
+  $("stop").addEventListener("click", () => post("/api/stop"));
+
+  poll();
+  setInterval(poll, 1000);
+})();
+</script>
+</body>
+</html>
