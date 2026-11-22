@@ -1,3 +1,6 @@
 /target
 /runs
 __pycache__/
+
+# Local agent handoff notes — machine-local, must not be published.
+/HANDOFF.md
