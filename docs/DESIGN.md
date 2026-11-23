@@ -373,7 +373,7 @@ Region{k,dlo,dhi,Rlo,Rhi}
 
 - Granularity: **d-block** (never the $q$ loop), so the wheel and masks are shared and there is no synchronisation in the hot path.
 - Per-thread hit vectors and counters, merged at block boundaries.
-- Threads: the machine is a shared laptop, so the *default is 2* (via `console.bat`) and the engine is launched below normal priority. Benchmarks used 8 threads, but that is the "machine is free" setting, not the daily one; 16 threads is never optimal here because of the power ceiling.
+- Threads: the console default is 6, leaving two of the eight physical cores free, and the engine is launched below normal priority. Benchmarks used 8 threads, but that is the "machine is free" setting, not the daily one; 16 threads is never optimal here because of the power ceiling.
 
 ### 5.4 Persistence and self-certification
 

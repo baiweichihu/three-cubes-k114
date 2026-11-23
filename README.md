@@ -53,12 +53,21 @@ pairs already checked and found not to be solutions; the pale outline is what is
 ![Console](docs/screenshot.png)
 
 ```bat
-console.bat 1.4815e18 1.48152e18 2 runs\region-a
+console.bat
 ```
 
+Double-clicking `console.bat` is enough. It opens the console on
+`d ∈ [1.4815e18, 2e18)`, uses six worker threads and stores its state in `runs\k114`.
+Nothing is scanned until `Start` is pressed. Optional arguments override those defaults
+in order: `console.bat [dlo] [dhi] [threads] [out-dir]`.
+
 `Start` resumes from the last checkpointed block, so closing the lid or pressing `Stop`
-costs at most one block of work. Keep `--threads` at 2–4 on a machine that is also used
-for other work; the console launches the engine below normal priority by default.
+costs at most one block of work. Closing the console window also terminates the engine
+on Windows. The six-thread default leaves two physical cores free; use
+`console.bat 1.4815e18 2e18 2` for a lighter footprint. The engine runs below normal
+priority by default. The header button switches between light and dark themes and
+remembers the choice locally. The timer row also shows the cumulative engine runtime in
+hours, stored in `console.json` and carried across restarts.
 
 ## Usage
 

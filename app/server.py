@@ -40,6 +40,73 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+# On Windows, put the engine in a Job Object whose last handle is owned by this
+# process. The kernel then terminates the engine even if the console is killed
+# or its command window is closed; Python exit handlers cannot cover that case.
+if IS_WINDOWS:
+    import ctypes
+    from ctypes import wintypes
+
+    class _JobBasicLimit(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+        )]
+
+    class _JobExtendedLimit(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _JobBasicLimit),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    _kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD,
+    ]
+    _kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    _kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = wintypes.BOOL
+
+    def _bind_engine_lifetime(proc: subprocess.Popen) -> int:
+        job = _kernel32.CreateJobObjectW(None, None)
+        if not job:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            info = _JobExtendedLimit()
+            info.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+            if not _kernel32.SetInformationJobObject(
+                job, 9, ctypes.byref(info), ctypes.sizeof(info)  # ExtendedLimitInformation
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not _kernel32.AssignProcessToJobObject(job, proc._handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+        except Exception:
+            _kernel32.CloseHandle(job)
+            raise
+        return job
+
+
 class Console:
     """Owns the child process and the accumulated picture of the region."""
 
@@ -47,9 +114,12 @@ class Console:
         self.cfg = cfg
         self.lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
+        self.job_handle: int | None = None
         self.reader: threading.Thread | None = None
         self.started_at: float | None = None
         self.session_seconds = 0.0
+        self.runtime_seconds = 0.0
+        self.last_save = 0.0
         self.runs: list[list[int]] = []
         self.current: list[int] | None = None
         self.totals = {
@@ -79,6 +149,7 @@ class Console:
         if data and data.get("region") == self.region_signature():
             self.runs = [[int(a), int(b)] for a, b in data.get("runs", [])]
             self.totals.update(data.get("totals", {}))
+            self.runtime_seconds = float(data.get("runtime_seconds", 0.0))
             self.hits = data.get("hits", [])[:64]
             self.completed = bool(data.get("completed"))
         # Fall back to the engine's own frontier if we have no console state.
@@ -87,11 +158,20 @@ class Console:
             if frontier and frontier > self.cfg["dlo"]:
                 self.runs = [[int(self.cfg["dlo"]), int(min(frontier, self.cfg["dhi"]))]]
 
+    def total_runtime_seconds(self) -> float:
+        """Committed runtime of finished sessions plus the live session."""
+        total = self.runtime_seconds
+        if self.started_at is not None:
+            total += time.time() - self.started_at
+        return total
+
     def save(self) -> None:
+        self.last_save = time.time()
         payload = {
             "region": self.region_signature(),
             "runs": self.runs,
             "totals": self.totals,
+            "runtime_seconds": round(self.total_runtime_seconds(), 2),
             "hits": self.hits[:64],
             "completed": self.completed,
             "saved_at": time.time(),
@@ -203,6 +283,17 @@ class Console:
                 self.last_error = str(exc)
                 return f"could not start engine: {exc}"
 
+            if IS_WINDOWS:
+                try:
+                    self.job_handle = _bind_engine_lifetime(self.proc)
+                except OSError as exc:
+                    self.proc.terminate()
+                    self.proc.wait(timeout=5)
+                    self.proc = None
+                    err_log.close()
+                    self.last_error = str(exc)
+                    return f"could not bind engine lifetime: {exc}"
+
             self.started_at = time.time()
             self.session_seconds = 0.0
             self.last_error = None
@@ -213,11 +304,20 @@ class Console:
             log(f"started pid={self.proc.pid} from d={frontier}")
             return None
 
+    def _release_job(self) -> None:
+        with self.lock:
+            job = self.job_handle
+            self.job_handle = None
+        if job is not None:
+            _kernel32.CloseHandle(job)
+
     def stop(self) -> str | None:
         with self.lock:
             proc = self.proc
-            if proc is None or proc.poll() is not None:
-                return "not running"
+            running = proc is not None and proc.poll() is None
+        if not running:
+            self._release_job()
+            return "not running"
         log(f"stopping pid={proc.pid}")
         try:
             proc.terminate()
@@ -226,9 +326,11 @@ class Console:
             proc.kill()
         except OSError:
             pass
+        self._release_job()
         with self.lock:
             if self.started_at is not None:
                 self.session_seconds = time.time() - self.started_at
+                self.runtime_seconds += self.session_seconds
             self.started_at = None
             self.current = None
             self.proc = None
@@ -253,9 +355,11 @@ class Console:
             except OSError:
                 pass
             code = proc.poll()
+            self._release_job()
             with self.lock:
                 if self.started_at is not None:
                     self.session_seconds = time.time() - self.started_at
+                    self.runtime_seconds += self.session_seconds
                 self.started_at = None
                 self.current = None
                 self.proc = None
@@ -288,6 +392,11 @@ class Console:
                 self.totals["dense"] += int(event.get("dense", 0))
                 self.totals["blocks"] += 1
                 self.rate_window.append((now, hi - lo))
+                # The engine can be killed together with the console, so the
+                # cumulative runtime must reach disk while a session is live,
+                # not only when it ends. Throttled to one write per 10 s.
+                if now - self.last_save >= 10.0:
+                    self.save()
             elif kind == "hit":
                 self.hits.insert(0, event)
                 del self.hits[64:]
@@ -325,6 +434,7 @@ class Console:
                 "hits": self.hits[:20],
                 "coverage": cov,
                 "elapsed": elapsed,
+                "runtime_seconds": self.total_runtime_seconds(),
                 "rate_d_per_s": rate_d,
                 "completed": self.completed,
                 "last_error": self.last_error,
@@ -385,7 +495,7 @@ def main() -> int:
     ap.add_argument("--dhi", type=str, required=True, help="upper edge of the d interval")
     ap.add_argument("--rlo", type=float, default=3.4, help="lower edge of R = |z|/d")
     ap.add_argument("--rhi", type=float, default=64.0, help="upper edge of R = |z|/d")
-    ap.add_argument("--threads", type=int, default=2, help="engine worker threads (keep low on a shared PC)")
+    ap.add_argument("--threads", type=int, default=6, help="engine worker threads (6 leaves 2 of the 8 physical cores free)")
     ap.add_argument("--block", type=int, default=1 << 16, help="d values per checkpointed block")
     ap.add_argument("--out", type=str, default=None, help="output directory (default runs/<k>-<dlo>)")
     ap.add_argument("--port", type=int, default=8731)
